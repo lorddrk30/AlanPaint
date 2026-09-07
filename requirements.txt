@@ -1,2 +1,2 @@
 PySide6>=6.6.0
-Pillow>=10.0.0
+Pillow>=10.1.0

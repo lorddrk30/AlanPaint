@@ -1,575 +1,735 @@
-"""
-UI module for AlanPaint
-Main window with menus, toolbar, and canvas
-"""
-
+"""AlanPaint desktop editor: drawing, cropping and non-destructive previews."""
 import os
-from typing import Optional, Tuple
-from PIL import Image
-from PySide6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QSplitter,
-    QToolBar, QToolButton, QLabel, QStatusBar, QMenuBar, QMenu,
-    QFileDialog, QColorDialog, QSlider, QDialog, QDialogButtonBox,
-    QVBoxLayout as DialogLayout, QFormLayout, QSpinBox, QComboBox,
-    QMessageBox, QInputDialog, QLineEdit, QGraphicsView, QGraphicsScene,
-    QGraphicsTextItem
-)
+from PIL import Image, ImageOps
 from PySide6.QtCore import Qt, QSize, QTimer
-from PySide6.QtGui import QAction, QIcon, QColor, QFont, QKeySequence
-
+from PySide6.QtGui import QAction, QColor, QIcon, QKeySequence, QPixmap
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QFrame, QVBoxLayout, QHBoxLayout,
+    QGridLayout, QLabel, QPushButton, QToolButton, QSlider, QSpinBox,
+    QComboBox, QCheckBox, QScrollArea, QFileDialog, QColorDialog,
+    QDialog, QDialogButtonBox, QFormLayout, QMessageBox, QInputDialog,
+    QLineEdit, QStackedWidget, QSizePolicy, QTabWidget,
+)
 from alanpaint.canvas import Canvas
-from alanpaint.tools import BrushTool, EraserTool, LineTool, RectangleTool, EllipseTool, TextTool, TOOL_NAMES
-from alanpaint.commands import CommandManager, DrawCommand, FilterCommand
-from alanpaint.filters import apply_filter, FILTER_DEFINITIONS
-from alanpaint.io import load_image, save_image, SUPPORTED_FORMATS
+from alanpaint.commands import CommandManager, FilterCommand, ReplaceImageCommand
+from alanpaint.tools import create_tool, TextTool, TOOL_NAMES
+from alanpaint.filters import apply_filter, apply_adjustments, FILTER_DEFINITIONS
+from alanpaint.io import load_image, save_image, pil_to_qimage, SUPPORTED_FORMATS, SUPPORTED_EXTENSIONS
+from alanpaint.theme import STYLE, icon
+
+
+def label(text, name=None):
+    widget = QLabel(text)
+    if name:
+        widget.setObjectName(name)
+    return widget
+
+
+def button(text, callback, glyph=None, primary=False):
+    widget = QPushButton(text)
+    if glyph:
+        widget.setIcon(icon(glyph, "#ffffff" if primary else "#73778c"))
+    if primary:
+        widget.setObjectName("primary")
+    widget.clicked.connect(callback)
+    return widget
+
+
+class DimensionsDialog(QDialog):
+    def __init__(self, parent, size, resizing=False):
+        super().__init__(parent)
+        self.setWindowTitle("Cambiar tamaño" if resizing else "Nuevo lienzo")
+        self.setMinimumWidth(340)
+        layout = QVBoxLayout(self)
+        layout.addWidget(label(self.windowTitle(), "title"))
+        layout.addWidget(label("Define las dimensiones en píxeles.", "muted"))
+        form = QFormLayout()
+        self.width_box, self.height_box = QSpinBox(), QSpinBox()
+        for spin, value in zip((self.width_box, self.height_box), size):
+            spin.setRange(1, 12000)
+            spin.setValue(value)
+            spin.setSuffix(" px")
+        form.addRow("Ancho", self.width_box)
+        form.addRow("Alto", self.height_box)
+        self.lock = QCheckBox("Mantener proporción")
+        self.lock.setChecked(resizing)
+        self.ratio = size[0]/size[1]
+        form.addRow(self.lock)
+        self.width_box.valueChanged.connect(lambda value: self._sync(value, True))
+        self.height_box.valueChanged.connect(lambda value: self._sync(value, False))
+        self.lock.toggled.connect(lambda checked: setattr(self, "ratio", self.width_box.value()/self.height_box.value()))
+        self.transparent = QCheckBox("Fondo transparente")
+        if not resizing:
+            form.addRow(self.transparent)
+        layout.addLayout(form)
+        actions = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        actions.button(QDialogButtonBox.Ok).setText("Cambiar tamaño" if resizing else "Crear lienzo")
+        actions.button(QDialogButtonBox.Cancel).setText("Cancelar")
+        actions.accepted.connect(self.accept)
+        actions.rejected.connect(self.reject)
+        layout.addWidget(actions)
+
+    def _sync(self, value, width_changed):
+        if self.lock.isChecked():
+            target = self.height_box if width_changed else self.width_box
+            target.blockSignals(True)
+            target.setValue(max(1, round(value/self.ratio if width_changed else value*self.ratio)))
+            target.blockSignals(False)
+
+    def dimensions(self):
+        return self.width_box.value(), self.height_box.value()
 
 
 class MainWindow(QMainWindow):
-    """Main window for AlanPaint application"""
-    
     def __init__(self):
         super().__init__()
-        
-        self.setWindowTitle("AlanPaint")
-        self.resize(1024, 768)
-        
-        # Data
-        self._current_file: Optional[str] = None
-        self._modified = False
-        
-        # Command manager for undo/redo
-        self._command_manager = CommandManager(max_undo=20)
-        
-        # Current tool
-        self._current_tool = BrushTool()
-        self._tool_color = (0, 0, 0)
-        self._brush_size = 5
-        
-        # Setup UI
-        self._setup_menubar()
-        self._setup_toolbar()
-        self._setup_central_widget()
-        self._setup_statusbar()
-        
-        # Connect signals
-        self._connect_signals()
-        
-        # Create new blank image
-        self._new_image(800, 600)
-    
-    # ==================== UI Setup ====================
-    
-    def _setup_menubar(self) -> None:
-        """Setup menu bar"""
-        menubar = self.menuBar()
-        
-        # File menu
-        file_menu = menubar.addMenu("&File")
-        
-        new_action = QAction("&New", self, shortcut=QKeySequence.New,
-                            triggered=self._new_image)
-        file_menu.addAction(new_action)
-        
-        open_action = QAction("&Open...", self, shortcut=QKeySequence.Open,
-                             triggered=self._open_image)
-        file_menu.addAction(open_action)
-        
-        file_menu.addSeparator()
-        
-        save_action = QAction("&Save", self, shortcut=QKeySequence.Save,
-                             triggered=self._save_image)
-        save_action.setEnabled(False)
-        file_menu.addAction(save_action)
-        
-        save_as_action = QAction("Save &As...", self, 
-                                  shortcut=QKeySequence("Ctrl+Shift+S"),
-                                  triggered=self._save_image_as)
-        file_menu.addAction(save_as_action)
-        
-        file_menu.addSeparator()
-        
-        exit_action = QAction("E&xit", self, shortcut=QKeySequence.Quit,
-                             triggered=self.close)
-        file_menu.addAction(exit_action)
-        
-        self._save_action = save_action
-        
-        # Edit menu
-        edit_menu = menubar.addMenu("&Edit")
-        
-        undo_action = QAction("&Undo", self, shortcut=QKeySequence.Undo,
-                             triggered=self._undo)
-        undo_action.setEnabled(False)
-        edit_menu.addAction(undo_action)
-        
-        redo_action = QAction("&Redo", self, shortcut=QKeySequence.Redo,
-                             triggered=self._redo)
-        redo_action.setEnabled(False)
-        edit_menu.addAction(redo_action)
-        
-        self._undo_action = undo_action
-        self._redo_action = redo_action
-        
-        # View menu
-        view_menu = menubar.addMenu("&View")
-        
-        zoom_in_action = QAction("Zoom &In", self, shortcut=QKeySequence("Ctrl++"),
-                                 triggered=self._zoom_in)
-        view_menu.addAction(zoom_in_action)
-        
-        zoom_out_action = QAction("Zoom &Out", self, shortcut=QKeySequence("Ctrl+-"),
-                                 triggered=self._zoom_out)
-        view_menu.addAction(zoom_out_action)
-        
-        zoom_fit_action = QAction("&Fit to Window", self,
-                                 triggered=self._zoom_fit)
-        view_menu.addAction(zoom_fit_action)
-        
-        zoom_100_action = QAction("&100%", self,
-                                 triggered=self._zoom_100)
-        view_menu.addAction(zoom_100_action)
-        
-        # Filters menu
-        filters_menu = menubar.addMenu("&Filters")
-        
-        for name, info in FILTER_DEFINITIONS.items():
-            action = QAction(name, self, triggered=lambda checked, n=name, i=info: self._apply_filter(n, i))
-            filters_menu.addAction(action)
-        
-        # Tools menu (for filled shapes)
-        tools_menu = menubar.addMenu("&Tools")
-        
-        self._filled_action = QAction("&Filled Shapes", self, checkable=True)
-        self._filled_action.setChecked(False)
-        self._filled_action.toggled.connect(self._update_filled_shapes)
-        tools_menu.addAction(self._filled_action)
-        
-        # Help menu
-        help_menu = menubar.addMenu("&Help")
-        
-        about_action = QAction("&About", self, triggered=self._show_about)
-        help_menu.addAction(about_action)
-    
-    def _setup_toolbar(self) -> None:
-        """Setup tool bar"""
-        toolbar = QToolBar("Tools")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
-        
-        # Tool buttons
-        tools = [
-            ("brush", "Brush", "B"),
-            ("eraser", "Eraser", "E"),
-            ("line", "Line", "L"),
-            ("rectangle", "Rectangle", "R"),
-            ("ellipse", "Ellipse", "O"),
-            ("text", "Text", "T"),
-        ]
-        
-        self._tool_buttons = {}
-        
-        for tool_id, tooltip, shortcut in tools:
-            btn = QToolButton()
-            btn.setText(shortcut)
-            btn.setToolTip(f"{tooltip} ({shortcut})")
-            btn.setCheckable(True)
-            btn.clicked.connect(lambda checked, t=tool_id: self._select_tool(t))
-            toolbar.addWidget(btn)
-            self._tool_buttons[tool_id] = btn
-        
-        # Select brush by default
-        self._tool_buttons["brush"].setChecked(True)
-        
-        toolbar.addSeparator()
-        
-        # Color button
-        self._color_btn = QToolButton()
-        self._color_btn.setText("■")
-        self._color_btn.setToolTip("Color")
-        self._color_btn.setFixedSize(32, 32)
-        self._color_btn.clicked.connect(self._select_color)
-        self._update_color_button()
-        toolbar.addWidget(self._color_btn)
-        
-        toolbar.addSeparator()
-        
-        # Brush size slider
-        size_label = QLabel("Size:")
-        toolbar.addWidget(size_label)
-        
-        self._size_slider = QSlider(Qt.Horizontal)
-        self._size_slider.setMinimum(1)
-        self._size_slider.setMaximum(50)
-        self._size_slider.setValue(5)
-        self._size_slider.setFixedWidth(100)
-        self._size_slider.valueChanged.connect(self._brush_size_changed)
-        toolbar.addWidget(self._size_slider)
-        
-        self._size_label = QLabel("5")
-        toolbar.addWidget(self._size_label)
-    
-    def _setup_central_widget(self) -> None:
-        """Setup central widget with canvas and scroll area"""
-        # Create scroll area
-        from PySide6.QtWidgets import QScrollArea
-        scroll_area = QScrollArea()
-        scroll_area.setWidgetResizable(False)
-        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        
-        # Create canvas
-        self._canvas = Canvas()
-        scroll_area.setWidget(self._canvas)
-        
-        # Set as central widget
-        self.setCentralWidget(scroll_area)
-    
-    def _setup_statusbar(self) -> None:
-        """Setup status bar"""
-        statusbar = QStatusBar()
-        self.setStatusBar(statusbar)
-        
-        # Image size label
-        self._size_status = QLabel("0 x 0")
-        statusbar.addPermanentWidget(self._size_status)
-        
-        # Zoom label
-        self._zoom_status = QLabel("100%")
-        statusbar.addPermanentWidget(self._zoom_status)
-        
-        # Tool label
-        self._tool_status = QLabel("Brush")
-        statusbar.addPermanentWidget(self._tool_status)
-        
-        # Position label
-        self._pos_status = QLabel("0, 0")
-        statusbar.addPermanentWidget(self._pos_status)
-    
-    def _connect_signals(self) -> None:
-        """Connect canvas signals"""
-        self._canvas.image_modified.connect(self._on_image_modified)
-        self._canvas.zoom_changed.connect(self._on_zoom_changed)
-        self._canvas.cursor_moved.connect(self._on_cursor_moved)
-    
-    # ==================== Image Operations ====================
-    
-    def _new_image(self, width: int = 800, height: int = 600) -> None:
-        """Create a new blank image"""
-        from alanpaint.io import create_blank_image
-        
+        self.resize(1280, 850)
+        self.setMinimumSize(1000, 680)
+        self.setStyleSheet(STYLE)
+        self.setWindowIcon(icon("brush", "#7858d6", 32))
+        self.setAcceptDrops(True)
         self._current_file = None
         self._modified = False
-        
-        # Create blank image
-        img = create_blank_image(width, height, (255, 255, 255))
-        self._canvas.set_image(img)
-        
-        # Reset command manager
-        self._command_manager.clear()
-        
-        # Update UI
-        self._update_title()
-        self._update_status()
-        self._update_undo_redo()
-    
-    def _open_image(self) -> None:
-        """Open an image file"""
-        # Build filter string
-        filters = []
-        for fmt, (desc, ext) in SUPPORTED_FORMATS.items():
-            filters.append(desc)
-        filters.append("All Files (*.*)")
-        filter_str = ";;".join(filters)
-        
-        # Show file dialog
-        path, selected_filter = QFileDialog.getOpenFileName(
-            self, "Open Image", "", filter_str
-        )
-        
-        if not path:
-            return
-        
-        try:
-            # Load image
-            img = load_image(path)
-            
-            self._current_file = path
-            self._modified = False
-            
-            # Set image to canvas
-            self._canvas.set_image(img)
-            
-            # Reset command manager
-            self._command_manager.clear()
-            
-            # Update UI
-            self._update_title()
-            self._update_status()
-            self._update_undo_redo()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to open image:\n{str(e)}")
-    
-    def _save_image(self) -> bool:
-        """Save the current image"""
-        if not self._current_file:
-            return self._save_image_as()
-        
-        try:
-            img = self._canvas.get_image()
-            if img:
-                save_image(img, self._current_file)
-                self._modified = False
-                self._update_title()
-                return True
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save image:\n{str(e)}")
-        
-        return False
-    
-    def _save_image_as(self) -> bool:
-        """Save image with a new name/format"""
-        # Build filter string
-        filters = []
-        for fmt, (desc, ext) in SUPPORTED_FORMATS.items():
-            filters.append(desc)
-        filters.append("All Files (*.*)")
-        filter_str = ";;".join(filters)
-        
-        # Show file dialog
-        path, selected_filter = QFileDialog.getSaveFileName(
-            self, "Save Image As", "", filter_str
-        )
-        
-        if not path:
-            return False
-        
-        # Check format support
-        ext = os.path.splitext(path)[1].lower()
-        if ext not in SUPPORTED_FORMATS:
-            # Try to add appropriate extension
-            if "png" in selected_filter.lower():
-                path = path if path.endswith(".png") else path + ".png"
-            elif "jpg" in selected_filter.lower():
-                path = path if path.endswith(".jpg") else path + ".jpg"
-            elif "webp" in selected_filter.lower():
-                path = path if path.endswith(".webp") else path + ".webp"
-        
-        try:
-            img = self._canvas.get_image()
-            if img:
-                save_image(img, path)
-                self._current_file = path
-                self._modified = False
-                self._update_title()
-                self._save_action.setEnabled(True)
-                return True
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to save image:\n{str(e)}")
-        
-        return False
-    
-    # ==================== Tool Operations ====================
-    
-    def _select_tool(self, tool_id: str) -> None:
-        """Select a drawing tool"""
-        tools = {
-            "brush": BrushTool,
-            "eraser": EraserTool,
-            "line": LineTool,
-            "rectangle": lambda: RectangleTool(self._filled_action.isChecked()),
-            "ellipse": lambda: EllipseTool(self._filled_action.isChecked()),
-            "text": TextTool,
-        }
-        
-        if tool_id not in tools:
-            return
-        
-        self._current_tool = tools[tool_id]()
-        self._canvas.set_tool(self._current_tool)
-        
-        # Update button states
-        for tid, btn in self._tool_buttons.items():
-            btn.setChecked(tid == tool_id)
-        
-        # Update status
-        self._tool_status.setText(TOOL_NAMES.get(tool_id, tool_id))
-    
-    def _update_filled_shapes(self, checked: bool) -> None:
-        """Update shape tools for filled mode"""
-        # Recreate current shape tool if needed
-        tool_name = type(self._current_tool).__name__
-        if tool_name in ("RectangleTool", "EllipseTool"):
-            self._select_tool(tool_name.lower().replace("tool", ""))
-    
-    def _select_color(self) -> None:
-        """Open color dialog"""
-        color = QColorDialog.getColor(
-            QColor(*self._tool_color), 
-            self, 
-            "Select Color"
-        )
-        
-        if color.isValid():
-            self._tool_color = (color.red(), color.green(), color.blue())
-            self._update_color_button()
-    
-    def _update_color_button(self) -> None:
-        """Update color button appearance"""
-        self._color_btn.setStyleSheet(
-            f"background-color: rgb({self._tool_color[0]}, "
-            f"{self._tool_color[1]}, {self._tool_color[2]});"
-        )
-    
-    def _brush_size_changed(self, value: int) -> None:
-        """Handle brush size change"""
+        self._command_manager = CommandManager()
+        self._tool_color, self._brush_size = (35, 38, 51), 8
+        self._tool_id = "brush"
+        self._selected_filter = "Original"
+        self._preview_source = None
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.setInterval(100)
+        self._preview_timer.timeout.connect(self._render_preview)
+        self._thumbnail_timer = QTimer(self)
+        self._thumbnail_timer.setSingleShot(True)
+        self._thumbnail_timer.setInterval(160)
+        self._thumbnail_timer.timeout.connect(self._update_thumbnails)
+        self._setup_actions()
+        self._setup_ui()
+        self._canvas.command_requested.connect(self._execute)
+        self._canvas.zoom_changed.connect(self._on_zoom_changed)
+        self._canvas.cursor_moved.connect(lambda x, y: self._pos_status.setText(f"X {x}  Y {y}"))
+        self._canvas.crop_changed.connect(self._crop_changed)
+        self._canvas.crop_accepted.connect(self._apply_crop)
+        self._canvas.crop_cancelled.connect(lambda: self._select_tool("brush"))
+        self._canvas.color_picked.connect(self._set_color)
+        self._canvas.text_requested.connect(self._insert_text)
+        self._new_image(1000, 700)
+        self._select_tool("brush")
+        self._inspector_tabs.setCurrentIndex(1)
+        QTimer.singleShot(0, self._canvas.zoom_fit)
+
+    def _action(self, text, callback, shortcut=None, glyph=None):
+        action = QAction(text, self)
+        if shortcut:
+            action.setShortcut(QKeySequence(shortcut))
+        if glyph:
+            action.setIcon(icon(glyph))
+        action.triggered.connect(lambda checked=False: callback())
+        return action
+
+    def _setup_actions(self):
+        self._new_action = self._action("Nuevo lienzo…", self._new_dialog, "Ctrl+N", "new")
+        self._open_action = self._action("Abrir imagen…", self._open_image, "Ctrl+O", "open")
+        self._save_action = self._action("Guardar", self._save_image, "Ctrl+S", "save")
+        self._save_as_action = self._action("Guardar como…", self._save_image_as, "Ctrl+Shift+S")
+        self._undo_action = self._action("Deshacer", self._undo, "Ctrl+Z", "undo")
+        self._redo_action = self._action("Rehacer", self._redo, "Ctrl+Y", "redo")
+        self._redo_action.setShortcuts([QKeySequence("Ctrl+Y"), QKeySequence("Ctrl+Shift+Z")])
+        file_menu = self.menuBar().addMenu("Archivo")
+        file_menu.addActions([self._new_action, self._open_action])
+        file_menu.addSeparator()
+        file_menu.addActions([self._save_action, self._save_as_action])
+        file_menu.addSeparator()
+        file_menu.addAction(self._action("Salir", self.close, "Alt+F4"))
+        self.menuBar().addMenu("Editar").addActions([self._undo_action, self._redo_action])
+        view_menu = self.menuBar().addMenu("Vista")
+        for text, callback, shortcut in [
+            ("Acercar", lambda: self._canvas.zoom_in(), "Ctrl++"),
+            ("Alejar", lambda: self._canvas.zoom_out(), "Ctrl+-"),
+            ("Ajustar a ventana", lambda: self._canvas.zoom_fit(), "Ctrl+0"),
+            ("Tamaño real", lambda: self._canvas.zoom_100(), "Ctrl+1")]:
+            view_menu.addAction(self._action(text, callback, shortcut))
+        image_menu = self.menuBar().addMenu("Imagen")
+        image_menu.addAction(self._action("Recortar", lambda: self._select_tool("crop"), "C"))
+        image_menu.addAction(self._action("Girar 90° a la derecha", self._rotate))
+        image_menu.addAction(self._action("Voltear horizontalmente", self._flip))
+        image_menu.addAction(self._action("Cambiar tamaño…", self._resize_image))
+        self.menuBar().addMenu("Ayuda").addAction(self._action("Acerca de AlanPaint", self._show_about))
+
+    def _setup_ui(self):
+        root = QWidget()
+        layout = QVBoxLayout(root)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        header = QFrame()
+        header.setObjectName("header")
+        row = QHBoxLayout(header)
+        row.setContentsMargins(22, 14, 22, 14)
+        mark = label("a", "logo")
+        mark.setAlignment(Qt.AlignCenter)
+        mark.setFixedSize(38, 38)
+        row.addWidget(mark)
+        row.addWidget(label("AlanPaint", "brand"))
+        row.addSpacing(12)
+        row.addWidget(label("TU ESPACIO CREATIVO", "section"))
+        row.addStretch()
+        row.addWidget(button("Nuevo", self._new_dialog, "new"))
+        row.addWidget(button("Abrir imagen", self._open_image, "open"))
+        row.addWidget(button("Guardar", self._save_image, "save", True))
+        layout.addWidget(header)
+        body = QHBoxLayout()
+        body.setSpacing(0)
+        body.addWidget(self._build_sidebar())
+        center = QVBoxLayout()
+        center.setSpacing(0)
+        context = QFrame()
+        context.setObjectName("context")
+        context_row = QHBoxLayout(context)
+        context_row.setContentsMargins(18, 10, 18, 10)
+        self._document_label = label("Sin título", "document")
+        context_row.addWidget(self._document_label)
+        self._saved_label = label("Sin cambios", "muted")
+        context_row.addWidget(self._saved_label)
+        context_row.addStretch()
+        for action in (self._undo_action, self._redo_action):
+            tool = QToolButton()
+            tool.setDefaultAction(action)
+            tool.setFixedSize(32, 30)
+            context_row.addWidget(tool)
+        center.addWidget(context)
+        self._canvas = Canvas()
+        center.addWidget(self._canvas, 1)
+        footer = QFrame()
+        footer.setObjectName("context")
+        footer_row = QHBoxLayout(footer)
+        footer_row.setContentsMargins(15, 7, 15, 7)
+        self._hint = label("Arrastra para dibujar · Espacio para mover", "muted")
+        footer_row.addWidget(self._hint, 1)
+        minus = button("−", lambda: self._canvas.zoom_out())
+        minus.setFixedSize(30, 28)
+        footer_row.addWidget(minus)
+        self._zoom_status = button("100%", lambda: self._canvas.zoom_100())
+        self._zoom_status.setToolTip("Ver al 100% · Ctrl+1")
+        self._zoom_status.setFixedSize(66, 28)
+        footer_row.addWidget(self._zoom_status)
+        plus = button("+", lambda: self._canvas.zoom_in())
+        plus.setFixedSize(30, 28)
+        footer_row.addWidget(plus)
+        fit = button("", lambda: self._canvas.zoom_fit(), "fit")
+        fit.setToolTip("Ajustar a ventana · Ctrl+0")
+        fit.setFixedSize(30, 28)
+        footer_row.addWidget(fit)
+        center.addWidget(footer)
+        body.addLayout(center, 1)
+        body.addWidget(self._build_inspector())
+        layout.addLayout(body, 1)
+        self.setCentralWidget(root)
+        self._size_status = label("", "muted")
+        self._pos_status = label("", "muted")
+        self._tool_status = label("Pincel", "muted")
+        self.statusBar().addWidget(label("  HECHO PARA CREAR", "section"))
+        self.statusBar().addPermanentWidget(self._tool_status)
+        self.statusBar().addPermanentWidget(self._pos_status)
+        self.statusBar().addPermanentWidget(self._size_status)
+
+    def _build_sidebar(self):
+        panel = QFrame()
+        panel.setObjectName("sidebar")
+        panel.setFixedWidth(194)
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(16, 22, 16, 16)
+        layout.setSpacing(5)
+        layout.addWidget(label("HERRAMIENTAS", "section"))
+        layout.addSpacing(10)
+        self._tool_buttons = {}
+        shortcuts = {"brush": "B", "eraser": "E", "line": "L", "rectangle": "R", "ellipse": "O", "text": "T", "crop": "C", "picker": "I", "hand": "H"}
+        for tool_id, name in TOOL_NAMES.items():
+            tool = QToolButton()
+            tool.setObjectName("tool")
+            tool.setText(name)
+            tool.setIcon(icon(tool_id))
+            tool.setIconSize(QSize(20, 20))
+            tool.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
+            tool.setCheckable(True)
+            tool.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            tool.setToolTip(f"{name} · {shortcuts[tool_id]}")
+            tool.clicked.connect(lambda checked=False, t=tool_id: self._select_tool(t))
+            if tool_id != "crop":
+                self.addAction(self._action(name, lambda t=tool_id: self._select_tool(t), shortcuts[tool_id]))
+            layout.addWidget(tool)
+            self._tool_buttons[tool_id] = tool
+        layout.addSpacing(20)
+        layout.addWidget(label("COLOR", "section"))
+        color_row = QHBoxLayout()
+        self._color_btn = button("", self._select_color)
+        self._color_btn.setFixedSize(32, 32)
+        self._color_hex = QLineEdit("#232633")
+        self._color_hex.setMaxLength(7)
+        self._color_hex.setToolTip("Color hexadecimal · #RRGGBB")
+        self._color_hex.editingFinished.connect(self._hex_changed)
+        color_row.addWidget(self._color_btn)
+        color_row.addWidget(self._color_hex)
+        layout.addLayout(color_row)
+        palette = QGridLayout()
+        palette.setSpacing(5)
+        colors = ["#232633", "#ffffff", "#9298ad", "#7858d6", "#ed6585", "#f0a94b", "#f5d966", "#65ba93", "#59acc9", "#5684e8", "#ab79d6", "#be8270"]
+        for n, color in enumerate(colors):
+            swatch = button("", lambda checked=False, c=color: self._set_color(QColor(c).getRgb()[:3]))
+            swatch.setFixedSize(22, 22)
+            swatch.setToolTip(color)
+            swatch.setStyleSheet(f"background: {color}; border: 1px solid #dcdde7; border-radius: 6px; padding: 0;")
+            palette.addWidget(swatch, n//6, n%6)
+        layout.addLayout(palette)
+        layout.addStretch()
+        layout.addWidget(label("Una idea. Infinitas posibilidades.", "muted"))
+        return panel
+
+    def _build_inspector(self):
+        panel = QFrame()
+        panel.setObjectName("inspector")
+        panel.setFixedWidth(270)
+        outer = QVBoxLayout(panel)
+        outer.setContentsMargins(12, 20, 12, 12)
+        outer.addWidget(label("Hazlo tuyo", "title"))
+        outer.addWidget(label("Pequeños cambios, grandes ideas.", "muted"))
+        self._inspector_tabs = QTabWidget()
+        outer.addWidget(self._inspector_tabs, 1)
+        editing = QWidget()
+        tool_layout = QVBoxLayout(editing)
+        tool_layout.setContentsMargins(6, 14, 6, 14)
+        tool_layout.setSpacing(14)
+        self._inspector_tabs.addTab(editing, "Herramienta")
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        content = QWidget()
+        content.setStyleSheet("background: white;")
+        layout = QVBoxLayout(content)
+        layout.setContentsMargins(4, 14, 4, 8)
+        layout.setSpacing(7)
+        self._tool_options = QStackedWidget()
+        drawing = QWidget()
+        drawing_layout = QVBoxLayout(drawing)
+        drawing_layout.setContentsMargins(0, 8, 0, 0)
+        size_row = QHBoxLayout()
+        size_row.addWidget(label("Tamaño del pincel"))
+        self._size_label = label("8 px", "muted")
+        size_row.addStretch()
+        size_row.addWidget(self._size_label)
+        drawing_layout.addLayout(size_row)
+        self._size_slider = QSlider(Qt.Horizontal)
+        self._size_slider.setRange(1, 100)
+        self._size_slider.setValue(8)
+        self._size_slider.valueChanged.connect(self._brush_size_changed)
+        drawing_layout.addWidget(self._size_slider)
+        self._filled = QCheckBox("Rellenar figuras")
+        self._filled.toggled.connect(self._filled_changed)
+        drawing_layout.addWidget(self._filled)
+        text_row = QHBoxLayout()
+        text_row.addWidget(label("Tamaño del texto"))
+        self._font_size = QSpinBox()
+        self._font_size.setRange(8, 300)
+        self._font_size.setValue(32)
+        self._font_size.setSuffix(" px")
+        text_row.addWidget(self._font_size)
+        drawing_layout.addLayout(text_row)
+        self._tool_options.addWidget(drawing)
+        crop = QWidget()
+        crop_layout = QVBoxLayout(crop)
+        crop_layout.setContentsMargins(0, 8, 0, 0)
+        crop_layout.addWidget(label("PROPORCIÓN DEL RECORTE", "section"))
+        self._crop_ratio = QComboBox()
+        for text, ratio in [("Libre", None), ("Cuadrado · 1:1", 1), ("Fotografía · 4:3", 4/3), ("Panorámico · 16:9", 16/9), ("Vertical · 9:16", 9/16)]:
+            self._crop_ratio.addItem(text, ratio)
+        self._crop_ratio.currentIndexChanged.connect(lambda: self._canvas.set_crop_ratio(self._crop_ratio.currentData()))
+        crop_layout.addWidget(self._crop_ratio)
+        self._crop_dimensions = label("Arrastra sobre la imagen.", "muted")
+        crop_layout.addWidget(self._crop_dimensions)
+        self._crop_apply = button("Aplicar recorte", self._apply_crop, "check", True)
+        self._crop_apply.setEnabled(False)
+        crop_layout.addWidget(self._crop_apply)
+        crop_layout.addWidget(button("Cancelar · Esc", lambda: self._select_tool("brush")))
+        self._tool_options.addWidget(crop)
+        tool_layout.addWidget(self._tool_options)
+        tool_layout.addSpacing(4)
+        tool_layout.addWidget(label("TRANSFORMAR", "section"))
+        transforms = QHBoxLayout()
+        for name, glyph, callback in [("Girar", "rotate", self._rotate), ("Voltear", "flip", self._flip), ("Tamaño", "resize", self._resize_image)]:
+            tool = QToolButton()
+            tool.setText(name)
+            tool.setIcon(icon(glyph))
+            tool.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            tool.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+            tool.clicked.connect(callback)
+            tool.setToolTip({"Girar": "Girar 90° a la derecha", "Voltear": "Voltear horizontalmente", "Tamaño": "Cambiar dimensiones de la imagen"}[name])
+            transforms.addWidget(tool)
+        tool_layout.addLayout(transforms)
+        tool_layout.addStretch()
+        tips = label("A tu ritmo.\n\nCtrl+Z para deshacer\nCtrl+rueda para acercar\nEspacio + arrastrar para mover\n\nTambién puedes soltar una imagen\naquí para abrirla.", "muted")
+        tool_layout.addWidget(tips)
+        layout.addWidget(label("FILTROS", "section"))
+        grid = QGridLayout()
+        grid.setSpacing(8)
+        self._filter_buttons = {}
+        for n, name in enumerate(FILTER_DEFINITIONS):
+            tool = QToolButton()
+            tool.setObjectName("filter")
+            tool.setText(name)
+            tool.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+            tool.setIconSize(QSize(94, 37))
+            tool.setFixedSize(108, 66)
+            tool.setCheckable(True)
+            tool.setChecked(n == 0)
+            tool.clicked.connect(lambda checked=False, name=name: self._choose_filter(name))
+            self._filter_buttons[name] = tool
+            grid.addWidget(tool, n//2, n%2)
+        layout.addLayout(grid)
+        layout.addWidget(label("AJUSTES", "section"))
+        self._adjustments = {}
+        for key, name in [("brightness", "Brillo"), ("contrast", "Contraste"), ("saturation", "Saturación")]:
+            row = QHBoxLayout()
+            row.addWidget(label(name))
+            value_label = label("100%", "muted")
+            row.addStretch()
+            row.addWidget(value_label)
+            layout.addLayout(row)
+            slider = QSlider(Qt.Horizontal)
+            slider.setRange(0, 200)
+            slider.setValue(100)
+            slider.setAccessibleName(name)
+            slider.valueChanged.connect(lambda value, target=value_label: target.setText(f"{value}%"))
+            slider.valueChanged.connect(self._queue_preview)
+            self._adjustments[key] = slider
+            layout.addWidget(slider)
+        self._preview_note = label("Vista previa antes de aplicar.", "muted")
+        outer.addWidget(self._preview_note)
+        self._apply_button = button("Aplicar cambios", self._apply_effects, "check", True)
+        self._apply_button.setEnabled(False)
+        outer.addWidget(self._apply_button)
+        reset = button("Restablecer", self._reset_effects)
+        reset.setObjectName("ghost")
+        outer.addWidget(reset)
+        layout.addStretch()
+        scroll.setWidget(content)
+        self._inspector_tabs.addTab(scroll, "Filtros y ajustes")
+        return panel
+
+    def _select_tool(self, tool_id):
+        if self._effects_pending():
+            self._reset_effects()
+        self._tool_id = tool_id
+        tool = create_tool(tool_id, self._filled.isChecked()) if tool_id in ("brush", "eraser", "line", "rectangle", "ellipse", "text") else None
+        self._canvas.set_tool(tool, tool_id)
+        self._canvas.set_color(self._tool_color)
+        self._canvas.set_brush_size(self._brush_size)
+        for name, widget in self._tool_buttons.items():
+            widget.setChecked(name == tool_id)
+            widget.setIcon(icon(name, "#7858d6" if name == tool_id else "#73778c"))
+        self._tool_options.setCurrentIndex(1 if tool_id == "crop" else 0)
+        self._inspector_tabs.setCurrentIndex(0)
+        self._tool_status.setText(TOOL_NAMES[tool_id])
+        hints = {"crop": "Arrastra para seleccionar · Enter aplica · Esc cancela", "text": "Haz clic donde quieras escribir", "picker": "Haz clic para tomar un color de la imagen", "hand": "Arrastra para mover el lienzo"}
+        self._hint.setText(hints.get(tool_id, "Arrastra para dibujar · Espacio para mover"))
+        self._canvas.setFocus()
+        self._update_color_button()
+
+    def _filled_changed(self):
+        if self._tool_id in ("rectangle", "ellipse"):
+            self._select_tool(self._tool_id)
+
+    def _brush_size_changed(self, value):
         self._brush_size = value
-        self._size_label.setText(str(value))
+        self._size_label.setText(f"{value} px")
         self._canvas.set_brush_size(value)
-    
-    # ==================== Filter Operations ====================
-    
-    def _apply_filter(self, name: str, info: dict) -> None:
-        """Apply a filter to the image"""
-        img = self._canvas.get_image()
-        if img is None:
+
+    def _select_color(self):
+        color = QColorDialog.getColor(QColor(*self._tool_color), self, "Elige un color")
+        if color.isValid():
+            self._set_color(color.getRgb()[:3])
+
+    def _hex_changed(self):
+        text = self._color_hex.text().strip()
+        color = QColor(text if text.startswith("#") else "#"+text)
+        if color.isValid():
+            self._set_color(color.getRgb()[:3])
+        else:
+            self._update_color_button()
+
+    def _set_color(self, color):
+        self._tool_color = tuple(color)
+        self._canvas.set_color(self._tool_color)
+        self._update_color_button()
+
+    def _update_color_button(self):
+        value = QColor(*self._tool_color).name()
+        self._color_btn.setStyleSheet(f"background: {value}; border: 1px solid #d8dbe6; border-radius: 7px;")
+        self._color_hex.setText(value.upper())
+
+    def _insert_text(self, x, y):
+        text, ok = QInputDialog.getMultiLineText(self, "Añadir texto", "Escribe tu texto:")
+        if ok and text.strip():
+            tool = TextTool()
+            tool.start(x, y, self._tool_color, self._font_size.value())
+            tool.set_text(text)
+            patch = tool.create_text_image()
+            self._canvas.commit_patch(patch, tool.region)
+
+    def _effects_pending(self):
+        return self._selected_filter != "Original" or any(s.value() != 100 for s in self._adjustments.values())
+
+    def _choose_filter(self, name):
+        self._selected_filter = name
+        for key, widget in self._filter_buttons.items():
+            widget.setChecked(key == name)
+        self._queue_preview()
+
+    def _queue_preview(self):
+        self._canvas.cancel_interaction()
+        pending = self._effects_pending()
+        self._canvas._preview_active = pending
+        self._apply_button.setEnabled(pending)
+        self._preview_note.setText("Vista previa · aplica para conservar." if pending else "Vista previa antes de aplicar.")
+        self._preview_timer.start()
+
+    def _effect_result(self, image, preview=False):
+        info = dict(FILTER_DEFINITIONS[self._selected_filter])
+        name = info.pop("name")
+        if preview and "radius" in info:
+            info["radius"] *= image.width/self._canvas.get_image().width
+        result = apply_filter(image, name, **info)
+        return apply_adjustments(result, **{key: slider.value() for key, slider in self._adjustments.items()})
+
+    def _render_preview(self):
+        if not self._effects_pending():
+            self._canvas.refresh()
             return
-        
+        if self._preview_source is None:
+            self._preview_source = self._canvas.get_image().copy()
+            self._preview_source.thumbnail((1200, 900), Image.Resampling.LANCZOS)
+        self._canvas.set_preview(self._effect_result(self._preview_source, preview=True))
+
+    def _reset_effects(self):
+        self._preview_timer.stop()
+        self._selected_filter = "Original"
+        for name, widget in self._filter_buttons.items():
+            widget.setChecked(name == "Original")
+        for slider in self._adjustments.values():
+            slider.setValue(100)
+        self._preview_timer.stop()
+        self._preview_source = None
+        self._apply_button.setEnabled(False)
+        self._preview_note.setText("Vista previa antes de aplicar.")
+        self._canvas.refresh()
+
+    def _apply_effects(self):
+        if not self._effects_pending():
+            return True
+        self._preview_timer.stop()
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
-            # Create filter kwargs
-            kwargs = {}
-            for key in ["factor", "radius", "bits"]:
-                if key in info:
-                    kwargs[key] = info[key]
-            
-            # Apply filter
-            filtered = apply_filter(img.copy(), info["name"], **kwargs)
-            
-            # Create and execute command
-            cmd = FilterCommand(img, filtered)
-            self._command_manager.execute(cmd)
-            
-            self._canvas.set_image(img)
-            self._update_status()
-            self._update_undo_redo()
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Error", f"Failed to apply filter:\n{str(e)}")
-    
-    # ==================== Undo/Redo ====================
-    
-    def _undo(self) -> None:
-        """Undo last action"""
+            image = self._canvas.get_image()
+            result = self._effect_result(image)
+            self._reset_effects()
+            self._execute(FilterCommand(image, result))
+            return True
+        except Exception as error:
+            QMessageBox.critical(self, "No se pudo aplicar el filtro", str(error))
+            return False
+        finally:
+            QApplication.restoreOverrideCursor()
+
+    def _update_thumbnails(self):
+        source = self._canvas.get_image()
+        if source is None:
+            return
+        thumb = ImageOps.fit(source, (188, 74), method=Image.Resampling.LANCZOS)
+        for name, info in FILTER_DEFINITIONS.items():
+            args = dict(info)
+            result = apply_filter(thumb, args.pop("name"), **args)
+            background = Image.new("RGBA", result.size, "#edeef3")
+            result = Image.alpha_composite(background, result.convert("RGBA"))
+            pixmap = QPixmap.fromImage(pil_to_qimage(result))
+            pixmap.setDevicePixelRatio(2)
+            self._filter_buttons[name].setIcon(QIcon(pixmap))
+
+    def _crop_changed(self, rect):
+        self._crop_apply.setEnabled(rect is not None)
+        self._crop_dimensions.setText(f"{rect[2]-rect[0]} × {rect[3]-rect[1]} px · Enter para aplicar" if rect else "Arrastra sobre la imagen.")
+
+    def _apply_crop(self):
+        rect = self._canvas.crop_rect
+        if rect:
+            self._execute(ReplaceImageCommand(self._canvas, self._canvas.get_image().crop(rect)))
+            self._select_tool("brush")
+            self._canvas.zoom_fit()
+            self.statusBar().showMessage("Imagen recortada. Puedes deshacer con Ctrl+Z.", 4500)
+
+    def _rotate(self):
+        if not self._apply_effects():
+            return
+        image = self._canvas.get_image().transpose(Image.Transpose.ROTATE_270)
+        self._execute(ReplaceImageCommand(self._canvas, image))
+        self._canvas.zoom_fit()
+
+    def _flip(self):
+        if not self._apply_effects():
+            return
+        self._execute(ReplaceImageCommand(self._canvas, ImageOps.mirror(self._canvas.get_image())))
+
+    def _resize_image(self):
+        dialog = DimensionsDialog(self, self._canvas.get_image_size(), True)
+        if dialog.exec() == QDialog.Accepted:
+            if not self._apply_effects():
+                return
+            if dialog.dimensions() != self._canvas.get_image_size():
+                image = self._canvas.get_image().resize(dialog.dimensions(), Image.Resampling.LANCZOS)
+                self._execute(ReplaceImageCommand(self._canvas, image))
+                self._canvas.zoom_fit()
+
+    def _execute(self, command):
+        self._command_manager.execute(command)
+        self._after_edit()
+
+    def _after_edit(self):
+        self._preview_source = None
+        self._canvas.refresh()
+        self._update_document()
+        self._thumbnail_timer.start()
+
+    def _undo(self):
+        if self._effects_pending():
+            self._reset_effects()
+            return
+        self._canvas.cancel_interaction()
+        old_size = self._canvas.get_image_size()
         if self._command_manager.undo():
-            img = self._canvas.get_image()
-            self._canvas.set_image(img)
-            self._update_undo_redo()
-    
-    def _redo(self) -> None:
-        """Redo last undone action"""
+            self._after_edit()
+            if old_size != self._canvas.get_image_size():
+                self._canvas.zoom_fit()
+
+    def _redo(self):
+        self._reset_effects()
+        self._canvas.cancel_interaction()
+        old_size = self._canvas.get_image_size()
         if self._command_manager.redo():
-            img = self._canvas.get_image()
-            self._canvas.set_image(img)
-            self._update_undo_redo()
-    
-    def _update_undo_redo(self) -> None:
-        """Update undo/redo action states"""
+            self._after_edit()
+            if old_size != self._canvas.get_image_size():
+                self._canvas.zoom_fit()
+
+    def _update_document(self):
+        self._modified = self._command_manager.modified
+        name = os.path.basename(self._current_file) if self._current_file else "Sin título"
+        self.setWindowTitle(f"{name}{' *' if self._modified else ''} — AlanPaint")
+        self._document_label.setText(name if len(name) <= 26 else name[:23]+"…")
+        self._document_label.setToolTip(self._current_file or name)
+        self._saved_label.setText("• Sin guardar" if self._modified else "Sin cambios")
         self._undo_action.setEnabled(self._command_manager.can_undo())
         self._redo_action.setEnabled(self._command_manager.can_redo())
-    
-    # ==================== Zoom Operations ====================
-    
-    def _zoom_in(self) -> None:
-        """Zoom in"""
-        self._canvas.zoom_in()
-    
-    def _zoom_out(self) -> None:
-        """Zoom out"""
-        self._canvas.zoom_out()
-    
-    def _zoom_fit(self) -> None:
-        """Fit image to window"""
+        w, h = self._canvas.get_image_size()
+        self._size_status.setText(f"   {w} × {h} px   ")
+
+    def _on_zoom_changed(self, zoom):
+        self._zoom_status.setText(f"{zoom*100:.0f}%" if zoom >= .1 else f"{zoom*100:.1f}%")
+
+    def _new_dialog(self):
+        dialog = DimensionsDialog(self, (1000, 700))
+        if dialog.exec() == QDialog.Accepted and self._confirm_discard():
+            self._new_image(*dialog.dimensions(), transparent=dialog.transparent.isChecked())
+
+    def _new_image(self, width=1000, height=700, transparent=False):
+        image = Image.new("RGBA" if transparent else "RGB", (width, height), (0, 0, 0, 0) if transparent else "white")
+        self._load_document(image)
+
+    def _load_document(self, image, path=None):
+        self._reset_effects()
+        self._command_manager.clear()
+        self._current_file = path
+        self._canvas.set_image(image)
         self._canvas.zoom_fit()
-    
-    def _zoom_100(self) -> None:
-        """Set 100% zoom"""
-        self._canvas.zoom_100()
-    
-    # ==================== Event Handlers ====================
-    
-    def _on_image_modified(self) -> None:
-        """Handle image modification"""
-        self._modified = True
-        self._update_title()
-        self._save_action.setEnabled(True)
-    
-    def _on_zoom_changed(self, zoom: float) -> None:
-        """Handle zoom change"""
-        self._zoom_status.setText(f"{int(zoom * 100)}%")
-    
-    def _on_cursor_moved(self, x: int, y: int) -> None:
-        """Handle cursor movement"""
-        self._pos_status.setText(f"{x}, {y}")
-    
-    def _update_title(self) -> None:
-        """Update window title"""
-        filename = os.path.basename(self._current_file) if self._current_file else "Untitled"
-        title = f"{filename}" + (" *" if self._modified else "") + " - AlanPaint"
-        self.setWindowTitle(title)
-    
-    def _update_status(self) -> None:
-        """Update status bar"""
-        width, height = self._canvas.get_image_size()
-        self._size_status.setText(f"{width} x {height}")
-    
-    def closeEvent(self, event) -> None:
-        """Handle close event"""
-        if self._modified:
-            reply = QMessageBox.question(
-                self, "Unsaved Changes",
-                "You have unsaved changes. Save before exiting?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
-            )
-            
-            if reply == QMessageBox.Save:
-                if not self._save_image():
-                    event.ignore()
-                    return
-            elif reply == QMessageBox.Cancel:
-                event.ignore()
-                return
-        
-        event.accept()
-    
-    def _show_about(self) -> None:
-        """Show about dialog"""
-        QMessageBox.about(
-            self,
-            "About AlanPaint",
-            "<h1>AlanPaint</h1>"
-            "<p><b>Created by Erik Ala Álvarez</b></p>"
-            "<p>Created with VibeCode</p>"
-            "<p>An open source application designed for computers with limited RAM.</p>"
-            "<p>Fast image viewer and basic editor.</p>"
-            "<p><i>Version 1.0.0</i></p>"
-        )
-    
-    # ==================== Keyboard Shortcuts ====================
-    
-    def keyPressEvent(self, event) -> None:
-        """Handle keyboard shortcuts"""
-        # Tool shortcuts
-        if event.key() == Qt.Key_B:
-            self._select_tool("brush")
-        elif event.key() == Qt.Key_E:
-            self._select_tool("eraser")
-        elif event.key() == Qt.Key_L:
-            self._select_tool("line")
-        elif event.key() == Qt.Key_R:
-            self._select_tool("rectangle")
-        elif event.key() == Qt.Key_O:
-            self._select_tool("ellipse")
-        elif event.key() == Qt.Key_T:
-            self._select_tool("text")
+        self._update_document()
+        self._thumbnail_timer.start()
+
+    def _confirm_discard(self):
+        if not self._command_manager.modified and not self._effects_pending():
+            return True
+        box = QMessageBox(self)
+        box.setWindowTitle("Guardar cambios")
+        box.setText("¿Quieres guardar los cambios de esta imagen?")
+        box.setInformativeText("También se guardarán los filtros que estás previsualizando.")
+        save = box.addButton("Guardar", QMessageBox.AcceptRole)
+        discard = box.addButton("Descartar", QMessageBox.DestructiveRole)
+        cancel = box.addButton("Cancelar", QMessageBox.RejectRole)
+        box.setDefaultButton(save)
+        box.setEscapeButton(cancel)
+        box.exec()
+        if box.clickedButton() == save:
+            return self._save_image()
+        return box.clickedButton() == discard
+
+    def _open_image(self):
+        path, _ = QFileDialog.getOpenFileName(self, "Abrir imagen", "", "Imágenes (*.png *.jpg *.jpeg *.webp *.bmp *.gif *.tif *.tiff);;Todos los archivos (*)")
+        if path:
+            self._open_path(path)
+
+    def _open_path(self, path):
+        try:
+            image = load_image(path)
+        except Exception as error:
+            QMessageBox.critical(self, "No se pudo abrir la imagen", str(error))
+            return
+        if self._confirm_discard():
+            self._load_document(image, path)
+
+    def _save_image(self):
+        if not self._current_file:
+            return self._save_image_as()
+        return self._write_file(self._current_file)
+
+    def _save_image_as(self):
+        filters = ";;".join(info[0] for info in SUPPORTED_FORMATS.values())
+        path, selected = QFileDialog.getSaveFileName(self, "Guardar imagen", self._current_file or "Mi creación.png", filters)
+        if not path:
+            return False
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in SUPPORTED_EXTENSIONS:
+            extension = next((info[1] for info in SUPPORTED_FORMATS.values() if info[0] == selected), ".png")
+            path += extension
+            if os.path.exists(path):
+                reply = QMessageBox.question(self, "Reemplazar archivo", f"Ya existe {os.path.basename(path)}. ¿Quieres reemplazarlo?", QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+                if reply != QMessageBox.Yes:
+                    return False
+        return self._write_file(path)
+
+    def _write_file(self, path):
+        try:
+            if not self._apply_effects():
+                return False
+            save_image(self._canvas.get_image(), path)
+            self._current_file = path
+            self._command_manager.mark_saved()
+            self._update_document()
+            self.statusBar().showMessage("Imagen guardada correctamente.", 4000)
+            return True
+        except Exception as error:
+            QMessageBox.critical(self, "No se pudo guardar", str(error))
+            return False
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls() and any(url.isLocalFile() and os.path.splitext(url.toLocalFile())[1].lower() in SUPPORTED_EXTENSIONS for url in event.mimeData().urls()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        for url in event.mimeData().urls():
+            if url.isLocalFile() and os.path.splitext(url.toLocalFile())[1].lower() in SUPPORTED_EXTENSIONS:
+                self._open_path(url.toLocalFile())
+                event.acceptProposedAction()
+                break
+
+    def closeEvent(self, event):
+        if self._confirm_discard():
+            event.accept()
         else:
-            super().keyPressEvent(event)
+            event.ignore()
+
+    def _show_about(self):
+        QMessageBox.about(self, "Acerca de AlanPaint", "<h2>AlanPaint 2.0</h2><p>Tu espacio para dibujar, editar y crear.</p><p>Creado por Erik Ala Álvarez con VibeCode.</p><p>Python · PySide6 · Pillow</p>")

@@ -11,10 +11,13 @@ def main():
     """Main entry point for AlanPaint"""
     app = QApplication(sys.argv)
     app.setApplicationName("AlanPaint")
-    app.setApplicationVersion("1.0.0")
+    app.setApplicationVersion("2.0.0")
+    app.setStyle("Fusion")
     
     window = MainWindow()
     window.show()
+    if len(sys.argv) > 1:
+        window._open_path(sys.argv[1])
     
     sys.exit(app.exec())
 

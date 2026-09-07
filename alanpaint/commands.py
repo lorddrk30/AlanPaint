@@ -1,208 +1,110 @@
-"""
-Commands module for AlanPaint
-Implements undo/redo functionality using command pattern
-"""
-
-from abc import ABC, abstractmethod
-from typing import List, Optional, Tuple
-from PIL import Image
+"""Undoable edits with bounded history and a saved-document revision."""
 
 
-class Command(ABC):
-    """Abstract base class for commands"""
-    
-    @abstractmethod
-    def execute(self) -> None:
-        """Execute the command"""
-        pass
-    
-    @abstractmethod
-    def undo(self) -> None:
-        """Undo the command"""
-        pass
-    
-    @abstractmethod
-    def redo(self) -> None:
-        """Redo the command"""
-        pass
-    
-    @abstractmethod
-    def is_filter(self) -> bool:
-        """Return True if this is a filter command"""
-        pass
+def image_bytes(image):
+    return image.width * image.height * len(image.getbands())
 
 
-class DrawCommand(Command):
-    """
-    Command for drawing operations (brush, eraser, shapes)
-    Stores the modified region as a separate image for memory efficiency
-    """
-    
-    def __init__(self, master_image: Image.Image, modified_region: Image.Image, 
-                 region: Tuple[int, int, int, int]):
-        """
-        Args:
-            master_image: Reference to the master image
-            modified_region: The modified portion as a separate image
-            region: (x, y, width, height) of the modified region
-        """
-        self._master = master_image
-        self._modified_region = modified_region
-        self._region = region
-        self._saved_region: Optional[Image.Image] = None
-    
-    def execute(self) -> None:
-        """Apply the modification to master image"""
-        x, y, w, h = self._region
-        
-        # Save the original region for undo
-        self._saved_region = self._master.crop((x, y, x + w, y + h))
-        
-        # Paste the modified region
-        self._master.paste(self._modified_region, (x, y))
-    
-    def undo(self) -> None:
-        """Restore the original region"""
-        if self._saved_region:
-            x, y, w, h = self._region
-            self._master.paste(self._saved_region, (x, y))
-    
-    def redo(self) -> None:
-        """Reapply the modification"""
-        self.execute()
-    
-    def is_filter(self) -> bool:
-        return False
-    
-    @property
-    def region(self) -> Tuple[int, int, int, int]:
-        return self._region
+class DrawCommand:
+    def __init__(self, master_image, modified_region, region):
+        self.master = master_image
+        self.region = region
+        x, y, w, h = region
+        self.before = master_image.crop((x, y, x+w, y+h))
+        self.after = modified_region
+        self.memory_bytes = image_bytes(self.before) + image_bytes(self.after)
+
+    def execute(self):
+        self.master.paste(self.after, self.region[:2])
+
+    def undo(self):
+        self.master.paste(self.before, self.region[:2])
+
+    redo = execute
 
 
-class FilterCommand(Command):
-    """
-    Command for filter operations
-    Stores the original full image for undo (limited by max_undo)
-    """
-    
-    def __init__(self, master_image: Image.Image, filtered_image: Image.Image):
-        self._master = master_image
-        self._filtered = filtered_image
-        self._original: Optional[Image.Image] = None
-    
-    def execute(self) -> None:
-        """Apply the filter to master image"""
-        # Save original for undo
-        self._original = self._master.copy()
-        
-        # Replace master content
-        self._master.paste(self._filtered)
-    
-    def undo(self) -> None:
-        """Restore the original image"""
-        if self._original:
-            self._master.paste(self._original)
-    
-    def redo(self) -> None:
-        """Reapply the filter"""
-        self.execute()
-    
-    def is_filter(self) -> bool:
-        return True
+class FilterCommand(DrawCommand):
+    def __init__(self, master_image, filtered_image):
+        super().__init__(master_image, filtered_image, (0, 0, *master_image.size))
 
 
-class TextCommand(Command):
-    """Command for text insertion"""
-    
-    def __init__(self, master_image: Image.Image, text_region: Image.Image, 
-                 region: Tuple[int, int, int, int]):
-        self._master = master_image
-        self._text_region = text_region
-        self._region = region
-        self._saved_region: Optional[Image.Image] = None
-    
-    def execute(self) -> None:
-        x, y, w, h = self._region
-        self._saved_region = self._master.crop((x, y, x + w, y + h))
-        self._master.paste(self._text_region, (x, y))
-    
-    def undo(self) -> None:
-        if self._saved_region:
-            x, y, w, h = self._region
-            self._master.paste(self._saved_region, (x, y))
-    
-    def redo(self) -> None:
-        self.execute()
-    
-    def is_filter(self) -> bool:
-        return False
+class ReplaceImageCommand:
+    """Keep image identity so earlier region commands survive crop/resize."""
+    def __init__(self, canvas, replacement):
+        self.canvas = canvas
+        self.before = canvas.get_image()
+        self.after = replacement
+        self.memory_bytes = image_bytes(self.before) + image_bytes(self.after)
+
+    def execute(self):
+        self.canvas.set_image(self.after)
+
+    def undo(self):
+        self.canvas.set_image(self.before)
+
+    redo = execute
+
+
+TextCommand = DrawCommand
 
 
 class CommandManager:
-    """
-    Manages undo/redo history with configurable limits
-    """
-    
-    def __init__(self, max_undo: int = 20):
-        self._undo_stack: List[Command] = []
-        self._redo_stack: List[Command] = []
-        self._max_undo = max_undo
-    
-    def execute(self, command: Command) -> None:
-        """Execute a command and add to undo stack"""
+    def __init__(self, max_undo=20, max_bytes=128 * 1024 * 1024):
+        self._max_undo, self._max_bytes = max_undo, max_bytes
+        self.clear()
+
+    def clear(self):
+        self._undo_stack, self._redo_stack = [], []
+        self._revision = self._saved_revision = self._sequence = 0
+
+    def execute(self, command):
         command.execute()
+        command.previous_revision = self._revision
+        self._sequence += 1
+        command.revision = self._sequence
+        self._revision = command.revision
         self._undo_stack.append(command)
-        
-        # Clear redo stack on new command
         self._redo_stack.clear()
-        
-        # Limit undo history
-        if len(self._undo_stack) > self._max_undo:
+        # Retain the most recent operation even when it exceeds the budget.
+        while len(self._undo_stack) > 1 and (len(self._undo_stack) > self._max_undo or
+                sum(c.memory_bytes for c in self._undo_stack) > self._max_bytes):
             self._undo_stack.pop(0)
-    
-    def undo(self) -> bool:
-        """Undo the last command"""
+
+    def undo(self):
         if not self._undo_stack:
             return False
-        
         command = self._undo_stack.pop()
         command.undo()
+        self._revision = command.previous_revision
         self._redo_stack.append(command)
         return True
-    
-    def redo(self) -> bool:
-        """Redo the last undone command"""
+
+    def redo(self):
         if not self._redo_stack:
             return False
-        
         command = self._redo_stack.pop()
         command.redo()
+        self._revision = command.revision
         self._undo_stack.append(command)
         return True
-    
-    def can_undo(self) -> bool:
-        return len(self._undo_stack) > 0
-    
-    def can_redo(self) -> bool:
-        return len(self._redo_stack) > 0
-    
-    def clear(self) -> None:
-        """Clear all history"""
-        self._undo_stack.clear()
-        self._redo_stack.clear()
-    
-    def set_max_undo(self, max_undo: int) -> None:
-        """Set maximum number of undo operations"""
-        self._max_undo = max_undo
-        
-        # Trim if necessary
-        while len(self._undo_stack) > self._max_undo:
-            self._undo_stack.pop(0)
-    
+
+    def mark_saved(self):
+        self._saved_revision = self._revision
+
     @property
-    def undo_count(self) -> int:
+    def modified(self):
+        return self._saved_revision != self._revision
+
+    def can_undo(self):
+        return bool(self._undo_stack)
+
+    def can_redo(self):
+        return bool(self._redo_stack)
+
+    @property
+    def undo_count(self):
         return len(self._undo_stack)
-    
+
     @property
-    def redo_count(self) -> int:
+    def redo_count(self):
         return len(self._redo_stack)

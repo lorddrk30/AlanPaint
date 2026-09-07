@@ -3,7 +3,7 @@ Image I/O module for AlanPaint
 Handles loading and saving images with Pillow
 """
 
-from PIL import Image
+from PIL import Image, ImageOps
 from PIL.Image import Resampling
 from PySide6.QtGui import QImage, QColor
 import os
@@ -26,22 +26,13 @@ SUPPORTED_EXTENSIONS = [".png", ".jpg", ".jpeg", ".webp", ".bmp", ".gif", ".tif"
 def load_image(path: str) -> Image.Image:
     """
     Load an image from file using Pillow
-    Returns PIL Image in RGB mode
+    Returns an independent RGB or RGBA image, applying EXIF orientation.
     """
     try:
-        img = Image.open(path)
-        
-        # Convert to RGB for consistent handling (remove alpha channel)
-        if img.mode in ("RGBA", "LA", "P"):
-            # Keep palette for GIF, otherwise convert to RGB
-            if img.mode == "P" and "transparency" in img.info:
-                img = img.convert("RGBA")
-            elif img.mode != "P":
-                img = img.convert("RGB")
-        elif img.mode not in ("RGB", "L"):
-            img = img.convert("RGB")
-        
-        return img
+        with Image.open(path) as source:
+            img = ImageOps.exif_transpose(source)
+            has_alpha = "A" in img.getbands() or "transparency" in img.info
+            return img.convert("RGBA" if has_alpha else "RGB")
     except Exception as e:
         raise ValueError(f"Failed to load image: {e}")
 
@@ -65,6 +56,10 @@ def save_image(pil_image: Image.Image, path: str, quality: int = 95) -> bool:
         elif ext in (".tif", ".tiff"):
             save_kwargs = {"compression": "tiff_deflate"}
         
+        if ext in (".jpg", ".jpeg", ".bmp") and pil_image.mode == "RGBA":
+            background = Image.new("RGB", pil_image.size, "white")
+            background.paste(pil_image, mask=pil_image.getchannel("A"))
+            pil_image = background
         pil_image.save(path, **save_kwargs)
         return True
     except Exception as e:
@@ -73,16 +68,17 @@ def save_image(pil_image: Image.Image, path: str, quality: int = 95) -> bool:
 
 def pil_to_qimage(pil_image: Image.Image) -> QImage:
     """
-    Convert PIL Image to QImage efficiently
-    Uses direct byte array conversion to avoid memory duplication
+    Convert to an owned QImage, preserving alpha and buffer lifetime.
     """
-    if pil_image.mode != "RGB":
-        pil_image = pil_image.convert("RGB")
+    if pil_image.mode not in ("RGB", "RGBA"):
+        pil_image = pil_image.convert("RGBA")
     
     data = pil_image.tobytes()
     width, height = pil_image.size
     
-    return QImage(data, width, height, width * 3, QImage.Format_RGB888)
+    channels = 4 if pil_image.mode == "RGBA" else 3
+    fmt = QImage.Format_RGBA8888 if channels == 4 else QImage.Format_RGB888
+    return QImage(data, width, height, width * channels, fmt).copy()
 
 
 def qimage_to_pil(qimage: QImage) -> Image.Image:
@@ -93,15 +89,9 @@ def qimage_to_pil(qimage: QImage) -> Image.Image:
     width = qimage.width()
     height = qimage.height()
     
-    # Convert to RGB if needed
-    if qimage.format() != QImage.Format_RGB888:
-        qimage = qimage.convertToFormat(QImage.Format_RGB888)
-    
-    # Get raw bytes
-    ptr = qimage.bits()
-    ptr.setsize(width * height * 3)
-    
-    return Image.frombytes("RGB", (width, height), ptr.tobytes())
+    qimage = qimage.convertToFormat(QImage.Format_RGBA8888)
+    return Image.frombytes("RGBA", (width, height), bytes(qimage.bits()),
+                           "raw", "RGBA", qimage.bytesPerLine())
 
 
 def create_blank_image(width: int, height: int, color: tuple = (255, 255, 255)) -> Image.Image:

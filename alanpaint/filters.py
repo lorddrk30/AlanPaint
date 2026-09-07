@@ -1,121 +1,46 @@
-"""
-Image filters module for AlanPaint
-Applies image filters using Pillow with memory efficiency
-"""
-
-from PIL import Image, ImageEnhance, ImageFilter
-from typing import Callable, Union, Tuple, Optional
+"""Pillow filters shared by thumbnails, previews and full-resolution edits."""
+from PIL import ImageEnhance, ImageFilter, ImageOps
 
 
-# Filter function type
-FilterFunc = Callable[[Image.Image], Image.Image]
-
-
-def grayscale(img: Image.Image) -> Image.Image:
-    """Convert image to grayscale"""
-    return img.convert("L").convert("RGB")
-
-
-def invert(img: Image.Image) -> Image.Image:
-    """Invert image colors"""
-    return Image.eval(img, lambda x: 255 - x)
-
-
-def brightness(img: Image.Image, factor: float = 1.0) -> Image.Image:
-    """Adjust image brightness"""
-    enhancer = ImageEnhance.Brightness(img)
-    return enhancer.enhance(factor)
-
-
-def contrast(img: Image.Image, factor: float = 1.0) -> Image.Image:
-    """Adjust image contrast"""
-    enhancer = ImageEnhance.Contrast(img)
-    return enhancer.enhance(factor)
-
-
-def saturation(img: Image.Image, factor: float = 1.0) -> Image.Image:
-    """Adjust image saturation/color intensity"""
-    enhancer = ImageEnhance.Color(img)
-    return enhancer.enhance(factor)
-
-
-def blur(img: Image.Image, radius: float = 2.0) -> Image.Image:
-    """Apply gaussian blur"""
-    return img.filter(ImageFilter.GaussianBlur(radius))
-
-
-def sharpen(img: Image.Image, factor: float = 1.0) -> Image.Image:
-    """Sharpen the image"""
-    enhancer = ImageEnhance.Sharpness(img)
-    return enhancer.enhance(factor)
-
-
-def posterize(img: Image.Image, bits: int = 4) -> Image.Image:
-    """
-    Reduce the number of bits used for each color channel
-    bits: 1-8, lower means fewer colors
-    """
-    factor = 256 - (2 ** bits)
-    return Image.eval(img, lambda x: x & ~factor)
-
-
-def sepia(img: Image.Image) -> Image.Image:
-    """Apply sepia tone effect"""
-    # Convert to grayscale
-    gray = img.convert("L")
-    
-    # Apply sepia matrix
-    sepia_matrix = [
-        0.393, 0.769, 0.189, 0,
-        0.349, 0.686, 0.168, 0,
-        0.272, 0.534, 0.131, 0
-    ]
-    
-    sepia_img = gray.convert("RGB", sepia_matrix)
-    return sepia_img
-
-
-def auto_contrast(img: Image.Image) -> Image.Image:
-    """Auto contrast adjustment"""
-    # Find min and max values for each channel
-    extrema = img.convert("RGB").getextrema()
-    print(f"Extrema: {extrema}")
-    # Scale each channel
-    return img.convert("RGB")
-
-
-def apply_filter(img: Image.Image, filter_name: str, **kwargs) -> Image.Image:
-    """
-    Apply a named filter to the image
-    """
+def apply_filter(img, filter_name, **kwargs):
+    alpha = img.getchannel("A") if img.mode == "RGBA" else None
+    rgb = img.convert("RGB")
+    factor = kwargs.get("factor", 1.0)
     filters = {
-        "grayscale": grayscale,
-        "invert": invert,
-        "brightness": lambda i: brightness(i, kwargs.get("factor", 1.0)),
-        "contrast": lambda i: contrast(i, kwargs.get("factor", 1.0)),
-        "saturation": lambda i: saturation(i, kwargs.get("factor", 1.0)),
-        "blur": lambda i: blur(i, kwargs.get("radius", 2.0)),
-        "sharpen": lambda i: sharpen(i, kwargs.get("factor", 1.0)),
-        "posterize": lambda i: posterize(i, kwargs.get("bits", 4)),
-        "sepia": sepia,
+        "original": lambda: rgb,
+        "grayscale": lambda: ImageOps.grayscale(rgb).convert("RGB"),
+        "invert": lambda: ImageOps.invert(rgb),
+        "brightness": lambda: ImageEnhance.Brightness(rgb).enhance(factor),
+        "contrast": lambda: ImageEnhance.Contrast(rgb).enhance(factor),
+        "saturation": lambda: ImageEnhance.Color(rgb).enhance(factor),
+        "blur": lambda: rgb.filter(ImageFilter.GaussianBlur(kwargs.get("radius", 2.0))),
+        "sharpen": lambda: ImageEnhance.Sharpness(rgb).enhance(kwargs.get("factor", 2.0)),
+        "posterize": lambda: ImageOps.posterize(rgb, kwargs.get("bits", 4)),
+        "sepia": lambda: ImageOps.colorize(ImageOps.grayscale(rgb), "#30201b", "#f3dfb5"),
+        "auto_contrast": lambda: ImageOps.autocontrast(rgb, cutoff=1),
     }
-    
     if filter_name not in filters:
-        raise ValueError(f"Unknown filter: {filter_name}")
-    
-    return filters[filter_name](img)
+        raise ValueError(f"Filtro desconocido: {filter_name}")
+    result = filters[filter_name]()
+    if alpha is not None:
+        result.putalpha(alpha)
+    return result
 
 
-# Filter definitions for UI
+def apply_adjustments(img, brightness=100, contrast=100, saturation=100):
+    for name, value in [("brightness", brightness), ("contrast", contrast), ("saturation", saturation)]:
+        if value != 100:
+            img = apply_filter(img, name, factor=value / 100)
+    return img
+
+
 FILTER_DEFINITIONS = {
-    "Grayscale": {"name": "grayscale", "icon": "▦"},
-    "Invert": {"name": "invert", "icon": "◐"},
-    "Brightness +": {"name": "brightness", "factor": 1.2, "icon": "☀"},
-    "Brightness -": {"name": "brightness", "factor": 0.8, "icon": "☾"},
-    "Contrast +": {"name": "contrast", "factor": 1.2, "icon": "◧"},
-    "Contrast -": {"name": "contrast", "factor": 0.8, "icon": "◨"},
-    "Blur": {"name": "blur", "radius": 2.0, "icon": "◌"},
-    "Sharpen": {"name": "sharpen", "factor": 1.5, "icon": "◆"},
-    "Posterize": {"name": "posterize", "bits": 4, "icon": "▣"},
-    "Sepia": {"name": "sepia", "icon": "◈"},
+    "Original": {"name": "original"},
+    "Blanco y negro": {"name": "grayscale"},
+    "Sepia": {"name": "sepia"},
+    "Invertir": {"name": "invert"},
+    "Suave": {"name": "blur", "radius": 2.0},
+    "Nítido": {"name": "sharpen", "factor": 2.0},
+    "Póster": {"name": "posterize", "bits": 3},
+    "Auto contraste": {"name": "auto_contrast"},
 }

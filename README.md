@@ -1,216 +1,74 @@
-# 🚀 AlanPaint
+# AlanPaint
 
-<div align="center">
+Editor de imágenes de escritorio creado por **Erik Ala Álvarez** con VibeCode. Desarrollado con Python, PySide6 y Pillow.
 
-**Lightweight Image Editor for Low-RAM Computers**
+## Versión 2.0
 
-*Fast, simple, and memory-efficient*
+- Interfaz moderna en español, herramientas con iconos y paleta de colores.
+- Pincel, borrador blanco, líneas, rectángulos, elipses y texto multilínea.
+- Recorte libre o con proporciones 1:1, 4:3, 16:9 y 9:16, con cuadrícula y vista sombreada.
+- Filtros con miniaturas y vista previa: blanco y negro, sepia, invertir, desenfoque, nitidez, póster y auto contraste.
+- Brillo, contraste y saturación ajustables mediante deslizadores.
+- Girar, voltear y cambiar tamaño conservando la proporción.
+- Cuentagotas, colores hexadecimales y tamaño de pincel configurable.
+- Deshacer y rehacer todas las ediciones, incluidos recortes y transformaciones.
+- Zoom del 1% al 1600%, ajuste a ventana y desplazamiento del lienzo.
+- Abrir imágenes al arrastrarlas sobre la ventana. Conserva transparencia y corrige orientación EXIF.
 
-[![Python 3.8+](https://img.shields.io/badge/python-3.8+-blue.svg)](https://www.python.org/downloads/)
-[![PySide6](https://img.shields.io/badge/PySide6-6.6+-green.svg)](https://doc.qt.io/qtforpython/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+## Empezar
 
-</div>
+En Windows, abre **dist/AlanPaint.exe**. Para ejecutar desde el código:
 
----
-
-## ✨ ¿Qué es AlanPaint?
-
-AlanPaint es un editor de imágenes ligero diseñado específicamente para computadoras con **poca memoria RAM**. Ideal para abrir y editar imágenes de forma rápida sin consumir muchos recursos.
-
-> **Creado por Erik Ala Álvarez** con ❤️ usando VibeCode
-
----
-
-## 🎯 Características Principales
-
-### Herramientas de Dibujo
-| Herramienta | Atajo | Descripción |
-|-------------|-------|-------------|
-| 🖌️ Pincel | `B` | Dibujo libre a mano alzada |
-| 🧹 Borrador | `E` | Borra partes de la imagen (blanco) |
-| 📏 Línea | `L` | Dibuja líneas rectas |
-| ⬜ Rectángulo | `R` | Dibuja rectángulos |
-| ⭕ Elipse | `O` | Dibuja elipses y círculos |
-| 🔤 Texto | `T` | Inserta texto en la imagen |
-
-### Filtros Integrados
-- ⚫ **Escala de grises** - Convierte a blanco y negro
-- 🔄 **Invertir** - Invierte los colores
-- ☀️ **Brillo +/-** - Ajusta el brillo
-- ◧ **Contraste +/-** - Ajusta el contraste
-- ◌ **Blur** - Desenfoque suave
-- ◆ **Sharpen** - Nitidez mejorada
-- ▣ **Posterize** - Reduce colores
-- ◈ **Sepia** - Tono vintage
-
-### Formatos Soportados
-| Formato | Extensiones | Soporte |
-|---------|-------------|---------|
-| PNG | `.png` | ✅ Completo |
-| JPEG | `.jpg`, `.jpeg` | ✅ Completo |
-| WebP | `.webp` | ✅ Completo |
-| BMP | `.bmp` | ✅ Completo |
-| GIF | `.gif` | ✅ Estático |
-| TIFF | `.tif`, `.tiff` | ✅ Completo |
-
----
-
-## 💾 Optimización de Memoria
-
-AlanPaint está diseñado para usar **mínima RAM**:
-
-```
-┌─────────────────────────────────────────────────────┐
-│                    ARQUITECTURA                     │
-├─────────────────────────────────────────────────────┤
-│                                                     │
-│  ┌──────────────┐    ┌──────────────────────────┐  │
-│  │   MASTER     │    │      PREVIEW CACHE       │  │
-│  │   IMAGE      │───▶│   (escalado pantalla)   │  │
-│  │  Full-Res    │    │   Actualizado solo en    │  │
-│  │  1 copia     │    │   zoom/commit            │  │
-│  └──────────────┘    └──────────────────────────┘  │
-│         │                      ▲                   │
-│         │                      │                   │
-│         ▼                      │                   │
-│  ┌──────────────┐    ┌──────────────────────────┐  │
-│  │   OVERLAY    │    │     CANVAS UI            │  │
-│  │  Temporal    │◀───│     (previsualización)   │  │
-│  │  Durante drag│    │                         │  │
-│  └──────────────┘    └──────────────────────────┘  │
-│                                                     │
-│  Undo/Redo: Solo regiones modificadas (máx 20)      │
-│                                                     │
-└─────────────────────────────────────────────────────┘
-```
-
-### Técnicas de Ahorro de RAM
-- ✅ **Una sola imagen master** en memoria
-- ✅ **Preview cache** escalado solo cuando cambia zoom
-- ✅ **Overlay temporal** durante arrastre del mouse
-- ✅ **Undo por comandos** - guarda solo regiones, no snapshots
-- ✅ **Sin PhotoImage/QPixmap duplicados**
-
----
-
-## ⌨️ Atajos de Teclado
-
-### Generales
-| Atajo | Acción |
-|-------|--------|
-| `Ctrl + O` | Abrir imagen |
-| `Ctrl + S` | Guardar |
-| `Ctrl + Shift + S` | Guardar como |
-| `Ctrl + Z` | Deshacer |
-| `Ctrl + Y` | Rehacer |
-| `Ctrl + +` | Zoom + |
-| `Ctrl + -` | Zoom - |
-| `Espacio` | Mantener para pan |
-
-### Herramientas
-| Atajo | Herramienta |
-|-------|-------------|
-| `B` | Pincel |
-| `E` | Borrador |
-| `L` | Línea |
-| `R` | Rectángulo |
-| `O` | Elipse |
-| `T` | Texto |
-
-### Mouse
-| Acción | Función |
-|--------|---------|
-| Click + Arrastrar | Dibujar |
-| Click Medio + Arrastrar | Panorámica |
-| Rueda | Scroll |
-| `Ctrl` + Rueda | Zoom |
-
----
-
-## 📦 Instalación
-
-### Windows y Linux
-
-```bash
-# 1. Crear entorno virtual
+```powershell
 python -m venv venv
-
-# 2. Activar entorno virtual
-# Windows:
-venv\Scripts\activate
-# Linux/Mac:
-source venv/bin/activate
-
-# 3. Instalar dependencias
-pip install -r requirements.txt
-
-# 4. Ejecutar
-python main.py
+.\venv\Scripts\python.exe -m pip install -r requirements.txt
+.\venv\Scripts\python.exe main.py
 ```
 
----
+Requiere Python 3.10 o superior y una versión compatible de PySide6. También puedes abrir una imagen desde la línea de comandos:
 
-## 📁 Estructura del Proyecto
-
-```
-AlanPaint/
-├── main.py              # Punto de entrada
-├── requirements.txt     # Dependencias
-├── README.md           # Este archivo
-├── create_demo.py     # Generador de imagen demo
-└── alanpaint/         # Paquete principal
-    ├── __init__.py
-    ├── canvas.py      # Widget canvas con overlay
-    ├── commands.py    # Comandos undo/redo
-    ├── filters.py     # Filtros de imagen
-    ├── io.py          # Carga/guardado de imágenes
-    ├── tools.py       # Herramientas de dibujo
-    └── ui.py          # Ventana principal
+```powershell
+.\venv\Scripts\python.exe main.py "C:\Fotos\imagen.png"
 ```
 
----
+## Editar una imagen
 
-## 🖼️ Imagen Demo
+1. Pulsa **Abrir imagen** o arrastra un archivo a la ventana.
+2. Selecciona una herramienta a la izquierda. En **Herramienta**, ajusta pincel, relleno y tamaño del texto.
+3. Para recortar, selecciona **Recortar**, elige una proporción y arrastra sobre la imagen. **Enter** aplica; **Esc** cancela. Puedes volver a arrastrar para cambiar la selección.
+4. En **Filtros y ajustes**, elige un filtro y mueve los deslizadores. **Aplicar cambios** conserva el resultado; **Restablecer** descarta la vista previa. Elegir otra herramienta también descarta la vista previa pendiente.
+5. Pulsa **Guardar**. Guardar aplica los filtros que se están previsualizando. El editor pregunta por los cambios pendientes antes de cerrar, abrir otra imagen o crear un lienzo nuevo.
 
-Genera una imagen de prueba:
+## Atajos
 
-```bash
-python create_demo.py
+| Acción | Atajo |
+|---|---|
+| Nuevo / Abrir / Guardar | Ctrl+N / Ctrl+O / Ctrl+S |
+| Guardar como | Ctrl+Shift+S |
+| Deshacer / Rehacer | Ctrl+Z / Ctrl+Y o Ctrl+Shift+Z |
+| Pincel / Borrador | B / E |
+| Línea / Rectángulo / Elipse | L / R / O |
+| Texto / Recortar | T / C |
+| Cuentagotas / Mover | I / H |
+| Aplicar / Cancelar recorte | Enter / Esc |
+| Acercar / Alejar | Ctrl+rueda o Ctrl++ / Ctrl+- |
+| Ajustar a ventana / Tamaño real | Ctrl+0 / Ctrl+1 |
+| Mover temporalmente | Espacio + arrastrar o botón central |
+
+## Formatos y memoria
+
+Abre y guarda PNG, JPEG, WebP, BMP, GIF estático y TIFF. PNG, WebP y TIFF conservan transparencia; JPEG y BMP usan fondo blanco al exportar una imagen transparente. El borrador pinta de blanco.
+
+El historial guarda regiones para los dibujos y las imágenes necesarias para filtros y transformaciones. Conserva hasta 20 operaciones con un presupuesto aproximado de 128 MiB; siempre retiene la última operación aunque exceda el presupuesto. La vista previa de filtros se limita a 1200 × 900 píxeles; al aplicar se usa la resolución original. Las imágenes grandes requieren más memoria.
+
+## Pruebas y ejecutable
+
+```powershell
+.\venv\Scripts\python.exe -m unittest discover -s tests -v
+.\venv\Scripts\python.exe -m pip install pyinstaller
+.\venv\Scripts\python.exe -m PyInstaller --noconfirm AlanPaint.spec
 ```
 
-Esto crea `demo.png` con formas y colores de prueba.
+Las pruebas usan QtTest en modo offscreen y verifican trazos, recortes, historial, zoom, filtros, transparencia y guardado. PyInstaller genera `dist/AlanPaint.exe`.
 
----
-
-## 🏗️ Compilar como EXE
-
-¿Quieres distribuir AlanPaint como ejecutable (.exe)?
-
-Consulta la guía completa: [BUILD_EXE.md](BUILD_EXE.md)
-
-```bash
-# Compilación básica
-pip install pyinstaller
-pyinstaller --onefile --windowed --name AlanPaint main.py
-```
-
----
-
-## 🤝 Licencia
-
-MIT License - Libre para usar, modificar y distribuir.
-
----
-
-## 💚 Acerca de
-
-**AlanPaint** fue creado por **Erik Ala Álvarez** usando **VibeCode**, como un proyecto open source diseñado para computadoras con memoria limitada que necesitan abrir y editar imágenes de forma rápida y eficiente.
-
----
-
-<div align="center">
-
-**¡Disfruta editando imágenes sin preocuparte por la memoria! 🖼️**
-
-</div>
+Consulta [CHANGELOG.md](CHANGELOG.md) para ver los cambios de la versión 2.0.
